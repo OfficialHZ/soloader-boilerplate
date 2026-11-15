@@ -11,6 +11,8 @@
 #include "reimpl/pthr.h"
 
 #include <stdlib.h>
+#include <errno.h>
+#include "reimpl/sys.h"
 #include <string.h>
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/threadmgr.h>
@@ -107,64 +109,86 @@ PTHR_INLINE int _attr_t_static_init(pthread_attr_t_bionic * attr) {
     return 0;
 }
 
-// null check for `mutex` param must be performed before this, `attr` is fine as null
-PTHR_INLINE int _mutex_t_static_init(pthread_mutex_t_bionic * mutex, const pthread_mutexattr_t * attr) {
-    int ret = 0, kind = PTHREAD_MUTEX_NORMAL;
+// MCSM port: no more fixed-size "initialized objects" table. It held only
+// 1024 entries; the Telltale engine creates far more mutexes/conds, and once
+// the table was full every lock call silently created a NEW real mutex
+// (locks stopped excluding, cond signals got lost -> main thread waited
+// forever for jobs). Instead, a bionic mutex/cond word that holds a real
+// heap pointer is initialized; one that still holds a bionic static
+// initializer value (0, 0x4000, 0x8000) is not.
+PTHR_INLINE int _is_static_init_value(uintptr_t v) {
+    return v == BIONIC_PTHREAD_MUTEX_INITIALIZER ||
+           v == BIONIC_PTHREAD_RECURSIVE_MUTEX_INITIALIZER ||
+           v == BIONIC_PTHREAD_ERRORCHECK_MUTEX_INITIALIZER;
+}
 
-    if (isObjectInitialized(mutex)) {
-        //logv_debug("mutex already initialized: %p", mutex);
-        return ret;
+// Creates the real newlib mutex. `force` = explicit pthread_mutex_init
+// (memory may hold garbage, always create); otherwise only create when the
+// word still holds a static initializer value.
+PTHR_INLINE int _mutex_t_create(pthread_mutex_t_bionic * mutex, const pthread_mutexattr_t * attr, int force) {
+    if (!force && !_is_static_init_value((uintptr_t) mutex->real_ptr))
+        return 0; // fast path: already initialized
+
+    PTHR_LOCK
+    uintptr_t v = (uintptr_t) mutex->real_ptr;
+    if (!force && !_is_static_init_value(v)) { // another thread won the race
+        PTHR_UNLOCK
+        return 0;
     }
 
+    int kind = PTHREAD_MUTEX_NORMAL;
     if (attr) {
         pthread_mutexattr_gettype((pthread_mutexattr_t *) attr, &kind);
-    } else {
-        if (* (int *) mutex == BIONIC_PTHREAD_MUTEX_INITIALIZER) kind = PTHREAD_MUTEX_NORMAL;
-        else if (* (int *) mutex == BIONIC_PTHREAD_RECURSIVE_MUTEX_INITIALIZER) kind = PTHREAD_MUTEX_RECURSIVE;
-        else if (* (int *) mutex == BIONIC_PTHREAD_ERRORCHECK_MUTEX_INITIALIZER) kind = PTHREAD_MUTEX_ERRORCHECK;
+    } else if (!force) {
+        if (v == BIONIC_PTHREAD_RECURSIVE_MUTEX_INITIALIZER) kind = PTHREAD_MUTEX_RECURSIVE;
+        else if (v == BIONIC_PTHREAD_ERRORCHECK_MUTEX_INITIALIZER) kind = PTHREAD_MUTEX_ERRORCHECK;
     }
 
-    pthread_mutex_t mut;
-    mutex->real_ptr = malloc(sizeof(pthread_mutex_t));
-    sceClibMemcpy(mutex->real_ptr, &mut, sizeof(pthread_mutex_t));
-
+    pthread_mutex_t *real = malloc(sizeof(pthread_mutex_t));
     pthread_mutexattr_t mutattr;
     pthread_mutexattr_init(&mutattr);
     pthread_mutexattr_settype(&mutattr, kind);
-    ret = pthread_mutex_init(mutex->real_ptr, &mutattr);
+    int ret = pthread_mutex_init(real, &mutattr);
     pthread_mutexattr_destroy(&mutattr);
 
     if (ret == 0) {
-        rememberObject(mutex);
+        mutex->real_ptr = real;
     } else {
+        free(real);
         l_error("mutex initialization for %p has failed", mutex);
     }
-
+    PTHR_UNLOCK
     return ret;
 }
 
-// null check for `cond` param must be performed before this, `attr` is fine as null
-PTHR_INLINE int _cond_t_static_init(pthread_cond_t_bionic * cond, const pthread_condattr_t * attr) {
-    int ret = 0;
+PTHR_INLINE int _mutex_t_static_init(pthread_mutex_t_bionic * mutex, const pthread_mutexattr_t * attr) {
+    return _mutex_t_create(mutex, attr, 0);
+}
 
-    if (isObjectInitialized(cond)) {
-        //logv_debug("cond already initialized: %p", cond);
-        return ret;
+// Same idea for conds: 0 (BIONIC_PTHREAD_COND_INITIALIZER) = not created yet.
+PTHR_INLINE int _cond_t_create(pthread_cond_t_bionic * cond, const pthread_condattr_t * attr, int force) {
+    if (!force && cond->real_ptr != NULL)
+        return 0;
+
+    PTHR_LOCK
+    if (!force && cond->real_ptr != NULL) {
+        PTHR_UNLOCK
+        return 0;
     }
-
-    pthread_cond_t c;
-    cond->real_ptr = malloc(sizeof(pthread_cond_t));
-    sceClibMemcpy(cond->real_ptr, &c, sizeof(pthread_cond_t));
-
-    ret = pthread_cond_init(cond->real_ptr, attr);
-
+    pthread_cond_t *real = malloc(sizeof(pthread_cond_t));
+    int ret = pthread_cond_init(real, attr);
     if (ret == 0) {
-        rememberObject(cond);
+        cond->real_ptr = real;
     } else {
+        free(real);
         l_error("cond initialization for %p has failed", cond);
     }
-
+    PTHR_UNLOCK
     return ret;
+}
+
+PTHR_INLINE int _cond_t_static_init(pthread_cond_t_bionic * cond, const pthread_condattr_t * attr) {
+    return _cond_t_create(cond, attr, 0);
 }
 
 int pthread_create_soloader(pthread_t *thread, const pthread_attr_t_bionic *attr, void *(*start)(void *), void *param) {
@@ -208,15 +232,15 @@ int pthread_kill_soloader(pthread_t thread, int sig)
 int pthread_mutex_init_soloader(pthread_mutex_t_bionic *uid, const pthread_mutexattr_t *attr)
 {
     if (!uid) return EINVAL;
-    return _mutex_t_static_init(uid, attr);
+    return _mutex_t_create(uid, attr, 1);
 }
 
 int pthread_mutex_destroy_soloader(pthread_mutex_t_bionic *mutex)
 {
     if (!mutex) return 0;
-    forgetObject(mutex);
+    if (_is_static_init_value((uintptr_t) mutex->real_ptr)) return 0;
     int ret = pthread_mutex_destroy(mutex->real_ptr);
-    if (mutex->real_ptr) free(mutex->real_ptr);
+    free(mutex->real_ptr);
     mutex->real_ptr = 0x0;
     return ret;
 }
@@ -238,7 +262,7 @@ int pthread_mutex_trylock_soloader(pthread_mutex_t_bionic *mutex)
 int pthread_mutex_unlock_soloader(pthread_mutex_t_bionic *mutex)
 {
     if (!mutex) return EINVAL;
-    if (!mutex->real_ptr) return EINVAL;
+    if (_is_static_init_value((uintptr_t) mutex->real_ptr)) return EPERM;
     return pthread_mutex_unlock(mutex->real_ptr);
 }
 
@@ -264,15 +288,15 @@ int pthread_cond_init_soloader(pthread_cond_t_bionic *cond,
 {
     if (!cond) return EINVAL;
 
-    return _cond_t_static_init(cond, attr);
+    return _cond_t_create(cond, attr, 1);
 }
 
 int pthread_cond_destroy_soloader(pthread_cond_t_bionic *cond)
 {
     if (!cond) return 0;
-    forgetObject(cond);
+    if (!cond->real_ptr) return 0;
     int ret = pthread_cond_destroy(cond->real_ptr);
-    if (cond->real_ptr) free(cond->real_ptr);
+    free(cond->real_ptr);
     cond->real_ptr = 0x0;
     return ret;
 }
@@ -430,34 +454,52 @@ int sem_init_soloader (int * uid, int pshared, unsigned int value) {
 }
 
 int sem_post_soloader (int * uid) {
-    if (sceKernelSignalSema(*uid, 1) < 0)
+    if (sceKernelSignalSema(*uid, 1) < 0) {
+        errno = EINVAL;
         return -1;
+    }
     return 0;
 }
 
+// MCSM port: proper sem_timedwait. The engine's PlatformSemaphore::TimedWait
+// builds `abstime` with clock_gettime(CLOCK_REALTIME) and retries forever
+// while errno == EINTR, so we must (1) wait until the deadline on the SAME
+// clock, and (2) set errno (ETIMEDOUT) on timeout. The old version gave up
+// after 1 ms, overflowed tv_sec * 1000000 and never set errno.
 int sem_timedwait_soloader (int * uid, const struct timespec * abstime) {
-    uint timeout = 1000;
-    if (sceKernelWaitSema(*uid, 1, &timeout) >= 0)
+    if (!abstime)
+        return sem_wait_soloader(uid);
+
+    struct timespec now;
+    clock_gettime_soloader(0 /* BIONIC_CLOCK_REALTIME */, &now);
+    int64_t remain_us = ((int64_t)abstime->tv_sec - (int64_t)now.tv_sec) * 1000000LL
+                      + ((int64_t)abstime->tv_nsec - (int64_t)now.tv_nsec) / 1000;
+
+    int res;
+    if (remain_us <= 0) {
+        res = sceKernelPollSema(*uid, 1);
+    } else {
+        SceUInt timeout = remain_us > 0x7FFFFFFF ? 0x7FFFFFFF : (SceUInt) remain_us;
+        res = sceKernelWaitSema(*uid, 1, &timeout);
+    }
+    if (res >= 0)
         return 0;
-    if (!abstime) return -1;
-    long long now = (long long) current_timestamp_ms() * 1000; // us
-    long long _timeout = abstime->tv_sec * 1000 * 1000 + abstime->tv_nsec / 1000; // us
-    if (_timeout-now >= 0) return -1;
-    uint timeout_real = _timeout - now;
-    if (sceKernelWaitSema(*uid, 1, &timeout_real) < 0)
-        return -1;
-    return 0;
+    errno = ETIMEDOUT;
+    return -1;
 }
 
 int sem_trywait_soloader (int * uid) {
-    uint timeout = 1000;
-    if (sceKernelWaitSema(*uid, 1, &timeout) < 0)
+    if (sceKernelPollSema(*uid, 1) < 0) {
+        errno = EAGAIN;
         return -1;
+    }
     return 0;
 }
 
 int sem_wait_soloader (int * uid) {
-    if (sceKernelWaitSema(*uid, 1, NULL) < 0)
+    if (sceKernelWaitSema(*uid, 1, NULL) < 0) {
+        errno = EINVAL;
         return -1;
+    }
     return 0;
 }

@@ -1115,10 +1115,39 @@ void *dlsym_soloader(void * handle, const char * symbol) {
     return NULL;
 }
 
+// MCSM port: extra symbols from source/mcsm/imports.c
+extern so_default_dynlib mcsm_dynlib[];
+extern int mcsm_dynlib_count;
+
 void resolve_imports(so_module* mod) {
     __sF_fake[0] = *stdin;
     __sF_fake[1] = *stdout;
     __sF_fake[2] = *stderr;
 
-    so_resolve(mod, default_dynlib, sizeof(default_dynlib), 0);
+    // so_resolve() takes a single table, so join the boilerplate's table
+    // with the MCSM-specific one (MCSM entries first, so they win).
+    static so_default_dynlib *combined = NULL;
+    static int combined_count = 0;
+    if (!combined) {
+        int base_count = sizeof(default_dynlib) / sizeof(default_dynlib[0]);
+        combined_count = mcsm_dynlib_count + base_count;
+        combined = malloc(combined_count * sizeof(so_default_dynlib));
+        memcpy(combined, mcsm_dynlib, mcsm_dynlib_count * sizeof(so_default_dynlib));
+        memcpy(combined + mcsm_dynlib_count, default_dynlib, base_count * sizeof(so_default_dynlib));
+    }
+
+    so_resolve(mod, combined, combined_count * sizeof(so_default_dynlib), 0);
+}
+// MCSM port: lets init.c check whether dynlib.c provides a symbol
+// (used for the "missing imports" report in log.txt).
+int dynlib_has_symbol(const char *symbol) {
+    for (int i = 0; i < mcsm_dynlib_count; i++) {
+        if (strcmp(symbol, mcsm_dynlib[i].symbol) == 0)
+            return 1;
+    }
+    for (int i = 0; i < sizeof(default_dynlib) / sizeof(default_dynlib[0]); i++) {
+        if (strcmp(symbol, default_dynlib[i].symbol) == 0)
+            return 1;
+    }
+    return 0;
 }

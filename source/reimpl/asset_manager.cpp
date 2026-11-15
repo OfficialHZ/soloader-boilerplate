@@ -8,6 +8,9 @@
 #include <libc_bridge/libc_bridge.h>
 #include <string>
 #include <fcntl.h>
+#include <vector>
+#include <psp2/io/dirent.h>
+#include <psp2/io/stat.h>
 
 typedef struct assetManager {
     int dummy = 0; // TODO: mb we will need to store something here in future
@@ -172,19 +175,48 @@ off_t AAsset_getLength(AAsset* asset) {
     return (off_t)a->fileSize;
 }
 
+// MCSM port: real directory listing over DATA_PATH/assets/<dirName>, the same
+// folder AAssetManager_open reads from. Like Android, only files are listed
+// (no subfolders), and NULL means "no more files". The old stub returned ""
+// forever, which made the engine loop endlessly at startup.
+typedef struct aAssetDir {
+    std::vector<std::string> names;
+    size_t next = 0;
+} aAssetDir;
+
 AAssetDir* AAssetManager_openDir(AAssetManager* mgr, const char* dirName) {
-    l_error("UNIMPLEMENTED: AAssetManager_openDir: %s", dirName);
-    return (AAssetDir *)strdup("dummy");
+    std::string path = std::string(DATA_PATH) + "assets";
+    if (dirName && dirName[0]) {
+        path += "/";
+        path += dirName;
+    }
+
+    auto * d = new aAssetDir;
+    SceUID fd = sceIoDopen(path.c_str());
+    if (fd >= 0) {
+        SceIoDirent entry;
+        memset(&entry, 0, sizeof(entry));
+        while (sceIoDread(fd, &entry) > 0) {
+            if (!SCE_S_ISDIR(entry.d_stat.st_mode))
+                d->names.emplace_back(entry.d_name);
+            memset(&entry, 0, sizeof(entry));
+        }
+        sceIoDclose(fd);
+    }
+    l_info("AAssetManager_openDir(\"%s\") -> %s, %u files", dirName ? dirName : "",
+           path.c_str(), (unsigned)d->names.size());
+    return (AAssetDir *) d;
 }
 
 const char* AAssetDir_getNextFileName(AAssetDir* assetDir) {
-    l_error("UNIMPLEMENTED: AAssetDir_getNextFileName: %p", assetDir);
-    return "";
+    auto * d = (aAssetDir *) assetDir;
+    if (!d || d->next >= d->names.size())
+        return nullptr;
+    return d->names[d->next++].c_str();
 }
 
 void AAssetDir_close(AAssetDir* assetDir) {
-    l_error("UNIMPLEMENTED: AAssetDir_close");
-    free(assetDir);
+    delete (aAssetDir *) assetDir;
 }
 
 int AAsset_openFileDescriptor(AAsset* asset, off_t* outStart, off_t* outLength) {

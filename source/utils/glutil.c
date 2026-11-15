@@ -5,6 +5,9 @@
  *
  * This software may be modified and distributed under the terms
  * of the MIT license. See the LICENSE file for details.
+ *
+ * MCSM port: shader compile results are logged, original GLSL is saved to
+ * DATA_PATH/glsl/, and the gxp/ cache folder is created automatically.
  */
 
 #include "utils/glutil.h"
@@ -98,12 +101,29 @@ void glCompileShader_soloader(GLuint shader) {
 #ifndef USE_GXP_SHADERS
     if (!skip_next_compile) {
         glCompileShader(shader);
+
+        // MCSM port: check whether vitaGL could translate/compile the shader.
+        GLint ok = GL_FALSE;
+        glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+        if (!ok) {
+            char info[1024];
+            GLsizei info_len = 0;
+            glGetShaderInfoLog(shader, sizeof(info), &info_len, info);
+            l_error("Shader compile FAILED for %s: %s", next_shader_fname,
+                    info_len > 0 ? info : "(no info log)");
+        } else {
+            l_info("Shader compiled OK: %s", next_shader_fname);
+        }
 #ifdef DUMP_COMPILED_SHADERS
-        void *bin = vglMalloc(32 * 1024);
-        GLsizei len;
-        vglGetShaderBinary(shader, 32 * 1024, &len, bin);
-        file_save(next_shader_fname, bin, len);
-        vglFree(bin);
+        if (ok) {
+            void *bin = vglMalloc(32 * 1024);
+            GLsizei len = 0;
+            vglGetShaderBinary(shader, 32 * 1024, &len, bin);
+            file_mkpath(next_shader_fname, 0777); // make sure gxp/ exists
+            if (len > 0)
+                file_save(next_shader_fname, bin, len);
+            vglFree(bin);
+        }
 #endif
     }
     skip_next_compile = GL_FALSE;
@@ -128,6 +148,14 @@ void load_shader(GLuint shader, const char * string, size_t length) {
         free(buffer);
         skip_next_compile = GL_TRUE;
     } else {
+        // MCSM port: keep a copy of every original GLSL shader for debugging
+        char glsl_path[256];
+        snprintf(glsl_path, sizeof(glsl_path), DATA_PATH"glsl/%s.glsl", sha_name);
+        if (!file_exists(glsl_path)) {
+            file_mkpath(glsl_path, 0777);
+            file_save(glsl_path, (const uint8_t *) string, length);
+        }
+
         glShaderSource(shader, 1, &string, &length);
         strcpy(next_shader_fname, gxp_path);
     }

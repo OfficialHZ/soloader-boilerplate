@@ -11,9 +11,9 @@ project(so_loader C CXX)
 include("${VITASDK}/share/vita.cmake" REQUIRED)
 
 # Vita application configuration
-set(VITA_APP_NAME "so-loader")
-set(VITA_TITLEID "SLDR00000")
-set(VITA_VPKNAME "so_loader")
+set(VITA_APP_NAME "Minecraft: Story Mode")
+set(VITA_TITLEID "MCSM00001")
+set(VITA_VPKNAME "mcsm")
 set(VITA_VERSION "01.00")
 set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")
 
@@ -22,8 +22,8 @@ set(PSVITAIP "192.168.0.198" CACHE STRING "PSVita IP (for FTP access)")
 set(PARSECOREPATH "$ENV{PARSECOREPATH}" CACHE STRING "vita-parse-core main.py")
 
 # Game-specific definitions
-set(DATA_PATH "ux0:data/gamename/") # Path to data (with trailing /)
-set(SO_PATH "${DATA_PATH}main.so") # Path to .so
+set(DATA_PATH "ux0:data/mcsm/") # Path to data (with trailing /)
+set(SO_PATH "${DATA_PATH}libGameEngine.so") # Path to the main engine .so
 add_definitions(-DDATA_PATH="${DATA_PATH}" -DSO_PATH="${SO_PATH}")
 
 # Port type
@@ -49,7 +49,7 @@ else()
 endif()
 
 set(valid_dump_formats GLSL CG)
-option(DUMP_COMPILED_SHADERS "When using GLSL or CG shader format, cache compiled shaders on disk" OFF)
+option(DUMP_COMPILED_SHADERS "When using GLSL or CG shader format, cache compiled shaders on disk" ON)
 if (DUMP_COMPILED_SHADERS)
   if (SHADER_FORMAT IN_LIST valid_dump_formats)
     add_definitions(-DDUMP_COMPILED_SHADERS)
@@ -73,10 +73,10 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   #add_definitions(-DDEBUG_PIPEFD=1)
   #add_definitions(-DDEBUG_CALLBACKS=1)
   # Space-separated flags passed to vitaGL
-  set(VITAGL_MAKE_FLAGS "SOFTFP_ABI=1 TEST=1 LOG_ERRORS=1")
+  set(VITAGL_MAKE_FLAGS "SOFTFP_ABI=1 HAVE_GLSL_SUPPORT=1 TEST=1 LOG_ERRORS=1")
 else()
   # Space-separated flags passed to vitaGL
-  set(VITAGL_MAKE_FLAGS "SOFTFP_ABI=1 NO_DEBUG=1")
+  set(VITAGL_MAKE_FLAGS "SOFTFP_ABI=1 HAVE_GLSL_SUPPORT=1 NO_DEBUG=1")
 endif()
 
 # makes sincos, sincosf, etc. visible
@@ -98,6 +98,7 @@ set(SOURCES
     source/dynlib.c
     source/java.c
     source/patch.c
+    source/mcsm/imports.c
     source/reimpl/bits/_ctype.c
     source/reimpl/errno.c
     source/reimpl/io.c
@@ -138,8 +139,6 @@ if(NDK_PORT)
 endif()
 
 # VitaGL built from lib/vitagl via its own Makefile.
-# Made this way so that testing quick adjustments to VitaGL is possible,
-# as well as changing build flags in a fast and efficient way.
 separate_arguments(VITAGL_MAKE_ARGS UNIX_COMMAND "${VITAGL_MAKE_FLAGS}")
 
 set(VITAGL_DIR ${CMAKE_SOURCE_DIR}/lib/vitagl)
